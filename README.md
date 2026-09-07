@@ -2,7 +2,7 @@
 
 Core implementation of **HMG-MRL: Hierarchical Multi-Granularity Molecular Representation Learning**.
 
-This repository provides the core model, atom and bond featurization, motif extraction, and molecular graph construction code. The complete data-cleaning and end-to-end preprocessing notebook is not included in this public release.
+This repository provides the core model, atom and bond featurization, motif extraction, and molecular graph construction code.
 
 ---
 
@@ -63,18 +63,17 @@ All datasets are obtained from [MoleculeNet](https://moleculenet.org/datasets-1)
   Implements a `Config` class for centralized management of all project parameters, including model hyperparameters and training settings.
 
 - **run_main.py**  
-  Contains reference classification training and evaluation code that consumes prepared feature dictionaries and label tables. It is not a standalone end-to-end reproduction entry point.
+  Contains reference classification training and evaluation code that consumes prepared feature dictionaries and label tables.
 
 ---
 
 ## Public Code Scope
 
 - `model/` implements the three-granularity model, cross-granularity communication, alignment loss, and attention-based fusion.
-- Atom embeddings from bipartite message passing are used directly for readout and cross-granularity communication, without an intermediate bidirectional GRU.
-- Each Motif Transformer layer applies LayerNorm after the residual addition in both its self-attention and feed-forward sublayers (Add & Norm).
+- Atom embeddings from bipartite message passing are used directly for readout and cross-granularity communication.
+- Each Motif Transformer layer applies LayerNorm after the residual addition in both its self-attention and feed-forward sublayers.
 - `preprocess/` provides atom/bond feature extraction, BRICS/Murcko/SMARTS motif extraction, motif feature aggregation, and graph construction utilities. Conformer, descriptor, and feature-cache utilities remain included.
-- Dataset-specific cleaning and the notebook that orchestrates the complete preprocessing workflow are not distributed.
 
 The model consumes prepared atom, bond, and motif feature tensors; atom/bond neighbor indices; validity masks; and molecular descriptors. See `GNN_atom_bond.forward` in `model/bipartite_transformer.py` for the input interface and `get_smiles_array` in `preprocess/get_atom_bond_frag_info.py` for the feature-dictionary adapter.
 
-The reference training script expects externally prepared `data/<task>.pickle` feature dictionaries and `data/<task>_remained_df.pickle` label tables. The public files do not constitute a turnkey training pipeline; integration of the reference script with the user's preprocessing and training environment is required.
+The reference training script expects externally prepared `data/<task>.pickle` feature dictionaries and `data/<task>_remained_df.pickle` label tables.
