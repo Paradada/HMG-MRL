@@ -465,3 +465,70 @@ motif_utils 中的三个来源开关理论上可以关闭 BRICS/Murcko/SMARTS，
 - **L_align 为什么像交叉熵**：代码把每个 anchor 的 positive 放在 logits 第 0 位，把其它非 self feature 作为 negatives，再用 CrossEntropyLoss；2N 行全部作为 anchor，因此是双向计算。
 
 在修复入口、split、配置开关和评估运行错误，并锁定 DeepChem/RDKit 版本及 descriptor 名称之前，不建议把论文表中的结果归因于当前仓库的可复现实验。
+
+## 17. 具体代码修改建议（仅建议，不修改源码）
+
+本节把前文问题转化为可执行的修改清单。建议严格按 P0 → P1 → P2 → P3 顺序实施：先恢复最小可运行路径，再校正实验 protocol，最后补齐回归、统计和消融能力。所有改动都应保留当前审查文档中的原始差异记录，避免“修复后无法追溯原始状态”。
+
+### 17.1 P0：恢复最小可运行路径
+
+| 优先级 | 位置 | 建议修改 | 验收条件 |
+|---|---|---|---|
+| P0-1 | [run_main.py](run_main.py#L342-L351) 的 `models` 和 `import_model()` | 将模型名称改为实际存在的 `bipartite_transformer`，或把导入逻辑改为直接导入该模块中的 `GNN_atom_bond`。不要仅通过复制或重命名制造一个空的兼容模块；应确认 `GNN_atom_bond` 在导入后进入当前命名空间。 | 在不执行训练的情况下运行模块导入检查，能够成功导入模型并实例化 `GNN_atom_bond`。 |
+| P0-2 | [other_utils.py](other_utils.py#L53-L75) 的 `scaffold_split_valid_test()` | 补充 `scaffold_split()` 的唯一实现。建议使用 RDKit 的 Murcko scaffold 作为分组键，先生成 scaffold 到样本索引的映射，再按 scaffold group 分配 train/valid/test，避免先逐行切分导致同一 scaffold 跨集合。`balanced`、`include_chirality` 和 `random_state` 必须真正影响实现，而不是只保留参数。 | 同一 scaffold 不出现在多个 split；三份数据无重复行；split 比例接近目标比例；固定 seed 可复现。 |
+| P0-3 | [config.py](config.py#L1-L105) 的 `Config` | 增加 `use_brics_fragments`、`use_murcko_fragments`、`use_smarts_fragments` 三个显式布尔配置，并给出默认值。默认值应与论文主实验确认后的 motif 组合一致；消融实验只能通过配置覆盖，不要在预处理函数中写死。 | 调用 `map_molecule_to_all_fragment_types()` 不再出现 `AttributeError`；关闭任一开关后对应来源不产生 motif。 |
+| P0-4 | [run_main.py](run_main.py#L273-L326) 的 `eval()` | 在每个 batch 开始时初始化 batch 级损失累加变量，并统一使用 `losses_list` 或一个明确的 `batch_loss` 变量。当前 `batch_eval_loss` 只在 `train()` 中初始化，不能在 `eval()` 中直接复用。评估阶段还应使用 `torch.no_grad()`。 | 使用一批有效分类样本调用 `eval()` 能返回有限的 ROC-AUC 和 loss，不出现 `NameError`；参数梯度保持为空。 |
+| P0-5 | [run_main.py](run_main.py#L15-L22)、[config.py](config.py#L28-L31) | 取消无条件的 `torch.set_default_tensor_type('torch.cuda.FloatTensor')`，统一根据 `cfg.device` 放置模型和输入张量。`torch.cuda.LongTensor` 也应改为 `.to(cfg.device, dtype=torch.long)`。 | 在 CPU 环境完成一次小 batch 前向、反向和评估；CUDA 环境仍能运行同一条路径。 |
+| P0-6 | [run_main.py](run_main.py#L70-L103) 的 `start_pogram()` | 对 `data/<task>_remained_df.pickle`、`data/<task>.pickle`、模型保存目录和日志目录增加启动前检查，并给出包含实际路径的明确错误信息。不要等到 `pickle.load()` 或 `torch.save()` 深处才失败。 | 缺少缓存文件时能立即指出缺失文件；目录不存在时可自动创建或明确终止。 |
+
+P0 完成后，建议只用一个小型、人工截取的数据子集跑通“加载缓存 → split → 一个 batch 训练 → 一个 batch eval”，不要立即启动五个 seed 的完整实验。
+
+### 17.2 P1：修正训练与评估 protocol
+
+| 优先级 | 位置 | 建议修改 | 验收条件 |
+|---|---|---|---|
+| P1-1 | [run_main.py](run_main.py#L121-L188) 的 `train_and_val()` | 训练期间只评估 train 和 valid，不再每个 epoch 调用 test。根据 valid ROC-AUC（或论文明确指定的 valid loss）保存最佳 checkpoint；训练结束后加载最佳 checkpoint，只调用一次 test 评估并写入最终结果。 | epoch 日志不再出现 test 指标；最终结果中的 test 指标只产生一次，且对应 valid 最优 checkpoint。 |
+| P1-2 | [run_main.py](run_main.py#L176-L183) 的 early stopping | 将停止规则拆成一个明确的 `early_stopping_metric` 和一个 `patience`。若论文要求 patience=50，应使用单一连续未改善计数；若保留 ROC 与 loss 双条件，必须在配置和报告中明确这是代码 protocol，而不是笼统写成 patience=50。 | 用固定的模拟 metric 序列测试停止 epoch，结果与配置语义一致。 |
+| P1-3 | [run_main.py](run_main.py#L238-L269)、[run_main.py](run_main.py#L300-L324) 的标签和 AUC 计算 | 把分类 missing label 过滤、单类别 split 处理、loss 平均方式封装成共享辅助函数。某 task 在某 split 只有一个类别时，不应静默调用 `roc_auc_score`；应记录 `NaN` 并在宏平均时排除，或按论文 protocol 明确终止。 | 缺失标签不会参与 loss/AUC；单类别任务不会产生未处理异常；宏平均分母正确。 |
+| P1-4 | [run_main.py](run_main.py#L138-L174) 和保存 checkpoint 的代码 | 保存路径应包含 task、seed、模型 variant 和 epoch，避免五次运行相互覆盖。最终结果应保存为结构化 JSON/CSV，至少包含 seed、best epoch、valid metric、test metric 和配置摘要。 | 连续运行五个 seed 后，每个 seed 的 checkpoint 和结果都可独立定位。 |
+| P1-5 | [other_utils.py](other_utils.py#L53-L75) 的两阶段 split | 明确第一阶段是否真的需要“固定 test、再划分 train/valid”。如果论文要求固定 split，应先生成并保存 split 索引，后续 seed 只改变模型随机性；如果论文要求每个 seed 重新 split，则保存每个 seed 的 scaffold 分组和索引。不要仅依赖 dataframe 当前行号。 | 重新运行可复原同一 split；日志能显示 split 版本、seed、样本数和 scaffold 数量。 |
+
+### 17.3 P2：补齐九个数据集和回归能力
+
+| 优先级 | 位置 | 建议修改 | 验收条件 |
+|---|---|---|---|
+| P2-1 | [config.py](config.py#L7-L10) 与 [run_main.py](run_main.py#L31-L57) | 将数据集定义从单个全局 `cfg.task_name` 扩展为数据集配置表：数据文件、任务列、任务类型、类别数、指标、缺失值规则和 split 文件分别声明。分类任务和回归任务不得靠任务列名 `Class` 猜测。 | BACE、BBBP、SIDER、ClinTox、HIV、Tox21、ESOL、FreeSolv、Lipophilicity 均能被配置表解析；每个任务类型选择正确 criterion 和 metric。 |
+| P2-2 | [run_main.py](run_main.py#L100-L109)、`train()`、`eval()` | 为回归增加独立分支：输出维度为每个 task 一个标量，使用 MSE 或论文指定的 regression loss；训练和评估分别计算 RMSE（`sqrt(MSE)`），并处理缺失标签。不要复用二分类的 `CrossEntropyLoss`、softmax 或 0/1 过滤。 | 人工构造连续标签数据时，模型输出形状、loss、RMSE 均正确；分类路径行为不变。 |
+| P2-3 | [config.py](config.py#L67-L73) 和预处理缓存流程 | 明确 descriptor 的 200 维来源、DeepChem/RDKit 版本和 descriptor 名称列表。若论文要求 train-only mean/std，应在训练 split 上拟合 scaler，并只将该 scaler 应用于 valid/test；scaler 参数随 split 保存。 | 同一 split 重跑得到同一 descriptor；valid/test 不参与 scaler 拟合；环境版本和 descriptor 数量在日志中可追溯。 |
+| P2-4 | [preprocess/get_atom_bond_frag_info.py](preprocess/get_atom_bond_frag_info.py) 的缓存生成入口 | 增加缓存 schema/version、数据集名、特征维度、descriptor 版本和 motif 开关记录。加载缓存时校验这些元数据，避免旧缓存被新配置误用。 | 配置或特征版本不匹配时在加载阶段明确报错，而不是在模型前向时出现形状错误。 |
+
+### 17.4 P3：补齐五次统计和六个消融实验
+
+| 优先级 | 位置 | 建议修改 | 验收条件 |
+|---|---|---|---|
+| P3-1 | 建议新增 `results/` 汇总模块，调用端接在 [run_main.py](run_main.py#L44-L81) 的 seed 循环之后 | 每个 seed 返回结构化结果，不要只写 logger。增加 mean、sample standard deviation、每个 seed 原始值和失败状态；分类按 task 和整体 macro 记录，回归按 task 记录 RMSE。 | 五个 seed 缺一不可；汇总值可由原始结果重新计算，不能只保存最终均值。 |
+| P3-2 | 建议新增统计工具模块 | 对模型与基线的同 seed 结果执行 paired t-test；同时报告差值、p 值、Cohen's $d_z$ 和单侧 95% 下置信界。明确“越大越好”与“越小越好”指标的方向，避免 RMSE 符号处理错误。 | 用一组已知数组进行单元测试，统计量与独立统计软件或手算结果一致；样本数不足时给出明确提示。 |
+| P3-3 | 建议新增 `variant` 配置表或 runner，不要在训练循环中散落 `if` | 至少注册六个 variant：去除 Bipartite Graph Encoder、Motif Transformer、Molecular Descriptor、CGComm、Alignment Loss，以及同时去除 CGComm 和 Alignment Loss。每个 variant 要明确替代表示、输出形状和 loss 权重。 | 每个 variant 可独立启动；配置快照能说明删掉了哪一模块；除目标模块外其它参数保持一致。 |
+| P3-4 | `preprocess/motif_utils.py` 的 motif 开关与模型 forward | motif 来源开关只能用于“来源消融”，不能冒充“去除 Motif Transformer”或“去除 CGComm”。应分别在模型构造或 forward 中控制 motif encoder、cross-attention 和 descriptor 分支，并为禁用分支提供形状一致的替代输出或显式跳过逻辑。 | 六个 variant 都能完成前向和训练；关闭模块不会因空 tensor、错误 mask 或未定义 projection 而崩溃。 |
+
+### 17.5 建议新增的最小测试清单
+
+在正式实验前，建议至少增加以下测试；这些测试不要求修改模型数学形式，但能防止运行修复破坏既有结构：
+
+1. **导入与构造测试**：验证实际模型模块可导入，使用一条合法缓存样本完成模型构造。
+2. **split 测试**：验证 scaffold 不跨 split、比例可接受、固定 seed 可复现、第二阶段不会把 test 样本带回 train/valid。
+3. **motif 测试**：分别打开和关闭 BRICS、Murcko、SMARTS，验证 whole molecule token 是否按约定保留，且精确重复 motif 被去重、overlap motif 被保留。
+4. **前向形状测试**：检查 atom、bond、motif、descriptor、prediction 和 alignment loss 的 batch 维度；同时覆盖单 motif、多个 motif 和 padding mask。
+5. **分类评估测试**：覆盖 missing label、单类别 split、空有效样本和多 task macro-AUC。
+6. **回归评估测试**：覆盖连续标签、缺失标签、单 task RMSE 和多 task RMSE。
+7. **protocol 测试**：确认训练过程中不读取 test metric；确认最终 test 只在加载最佳 valid checkpoint 后评估一次。
+8. **variant 测试**：六个消融配置均能完成至少一个 batch 的前向和反向。
+
+### 17.6 推荐实施顺序与暂停点
+
+1. 先完成 P0-1 至 P0-6，并用小数据 smoke test 验证；此时不要宣称论文可复现。
+2. 再完成 P1-1 至 P1-5，固定 split、checkpoint 和最终 test protocol；保存一次可审计的分类基线。
+3. 然后完成 P2，逐个数据集验证特征缓存、任务列、loss 和指标；分类与回归结果分开汇总。
+4. 最后完成 P3，再运行五个 seed 和六个 variant；统计表必须从原始结果文件自动生成。
+
+每个暂停点都应记录：代码版本、环境文件、数据文件校验值、split 索引、随机 seed、配置快照、checkpoint 路径和结果文件路径。只有 P0-P3 全部通过后，才适合把结果与论文表格逐项对比。
